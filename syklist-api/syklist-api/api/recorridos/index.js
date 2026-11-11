@@ -1,9 +1,13 @@
 import { ruta } from '../../lib/api.js';
+import { obtenerPlan, LIMITE_HISTORIAL_GRATIS } from '../../lib/plan.js';
 
 export default ruta({
-  // GET /api/recorridos?limite=4  →  lista de recorridos finalizados, el más nuevo primero
+  // GET /api/recorridos?limite=4  →  recorridos finalizados, el más nuevo primero.
+  // Plan gratis: como máximo los últimos 5. Plan premium: historial ilimitado (RF14).
   GET: async (req, res, { db, usuario }) => {
-    const limite = Math.min(Math.max(parseInt(req.query.limite, 10) || 20, 1), 100);
+    const pedido = Math.min(Math.max(parseInt(req.query.limite, 10) || 20, 1), 100);
+    const plan = await obtenerPlan(db, usuario.id);
+    const limite = plan === 'premium' ? pedido : Math.min(pedido, LIMITE_HISTORIAL_GRATIS);
 
     const { data, error } = await db
       .from('recorridos')
