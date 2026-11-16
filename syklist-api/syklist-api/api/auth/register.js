@@ -1,13 +1,21 @@
 import { ruta, anonDb } from '../../lib/api.js';
 
-// POST /api/auth/register   body: { email, password, nombre }
+// POST /api/auth/register   body: { email, password, nombre, acepto_terminos, version_terminos }
 // Crea el usuario en Supabase Auth, su fila en "perfiles" e inicia sesión.
+// Exige haber aceptado los Términos de uso y la Política de Privacidad, y guarda
+// qué versión aceptó y cuándo (en los datos del usuario de Supabase Auth).
 export default ruta(
   {
     POST: async (req, res, { db }) => {
-      const { email, password, nombre } = req.body || {};
+      const { email, password, nombre, acepto_terminos, version_terminos } = req.body || {};
       if (!email || !password || !nombre) {
         return res.status(400).json({ error: 'Faltan email, password o nombre' });
+      }
+      // La aceptación se exige acá, en el servidor: no alcanza con bloquear el botón en la app.
+      if (acepto_terminos !== true) {
+        return res.status(400).json({
+          error: 'Para crear la cuenta tenés que aceptar los Términos de uso y la Política de Privacidad.',
+        });
       }
       if (String(password).length < 6) {
         return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
@@ -18,7 +26,11 @@ export default ruta(
         email,
         password,
         email_confirm: true,
-        user_metadata: { nombre },
+        user_metadata: {
+          nombre,
+          terminos_version: String(version_terminos || '').slice(0, 20),
+          terminos_aceptados_en: new Date().toISOString(),
+        },
       });
       if (error) {
         const yaExiste = /already|registered|exists/i.test(error.message);
