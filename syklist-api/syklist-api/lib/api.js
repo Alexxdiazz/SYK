@@ -1,84 +1,51 @@
-import { createClient } from '@supabase/supabase-js';
+import { ruta, anonDb } from '../../lib/api.js';
 
-const OPCIONES = { auth: { persistSession: false, autoRefreshToken: false } };
-
-/** Cliente con permisos totales (service role). SOLO se usa dentro de la API, nunca en Flutter. */
-export function adminDb() {
-  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, OPCIONES);
-}
-
-/** Cliente con la clave pública: se usa solo para iniciar sesión con email y contraseña. */
-export function anonDb() {
-  return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY, OPCIONES);
-}
-
-/**
- * Envuelve una ruta de la API y se ocupa de lo repetitivo:
- *  - CORS (necesario para que Flutter Web pueda llamar a la API)
- *  - elegir la función según el método HTTP (GET, POST, PATCH...)
- *  - validar el token de sesión y saber QUIÉN es el usuario
- *  - capturar errores
- *
- * Uso:  export default ruta({ GET: async (req, res, { db, usuario }) => { ... } });
- * Con { publica: true } la ruta no exige sesión (login y registro).
- */
-export function ruta(metodos, { publica = false } = {}) {
-  return async function handler(req, res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    res.setHeader('Access-Control-Max-Age', '86400');
-
-    // El navegador manda un OPTIONS de "consulta previa" antes de POST/PATCH.
-    if (req.method === 'OPTIONS') return res.status(204).end();
-
-    if (!Object.prototype.hasOwnProperty.call(metodos, req.method)) {
-      return res.status(405).json({ error: `Método ${req.method} no permitido` });
-    }
-
-    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY || !process.env.SUPABASE_ANON_KEY) {
-      return res.status(500).json({
-        error: 'Faltan variables de entorno en Vercel (SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY)',
+export default ruta(
+  {
+    POST: async (req, res, { db }) => {
+      const { email, password, nombre, acepto_terminos, version_terminos } = req.body || {};
+      if (!email || !password || !nombre) {
+        return res.status(400).json({ error: 'Faltan email, password o nombre' });
+      }
+      if (acepto_terminos !== true) {
+        return res.status(400).json({
+          error: 'Para crear la cuenta tenés que aceptar los Términos de uso y la Política de Privacidad.',
+        });
+      }
+      if (String(password).length < 6) {
+        return res.status(400).json({ error: 'La contraseña debe tener al menos 6 caracteres' });
+      }
+      const { data: creado, error } = await db.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+        user_metadata: {
+          nombre,
+          terminos_version: String(version_terminos || '').slice(0, 20),
+          terminos_aceptados_en: new Date().toISOString(),
+        },
       });
-    }
-
-    try {
-      const db = adminDb();
-      let usuario = null;
-
-      if (!publica) {
-        const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-        if (!token) return res.status(401).json({ error: 'Falta el token de sesión' });
-
-        const { data, error } = await db.auth.getUser(token);
-        if (error || !data?.user) return res.status(401).json({ error: 'Sesión inválida o vencida' });
-        usuario = data.user;
+      if (error) {
+        const yaExiste = /already|registered|exists/i.test(error.message);
+        return res.status(yaExiste ? 409 : 400).json({
+          error: yaExiste ? 'Ya existe una cuenta con ese email' : error.message,
+        });
       }
 
-      return await metodos[req.method](req, res, { db, usuario });
-    } catch (e) {
-      console.error(e);
-      return res.status(500).json({ error: e?.message || 'Error interno del servidor' });
-    }
-  };
-}
+      const { data: perfil, error: errPerfil } = await db
+        .from('perfiles')
+        .upsert({ id: creado.user.id, nombre: String(nombre).trim() }, { onConflict: 'id' })
+        .select('id, nombre, plan')
+        .single();
+      if (errPerfil) return res.status(500).json({ error: errPerfil.message });
 
-/** Devuelve el perfil del usuario; si por algún motivo no existe todavía, lo crea. */
-export async function asegurarPerfil(db, usuario) {
-  const { data, error } = await db
-    .from('perfiles')
-    .select('id, nombre, plan')
-    .eq('id', usuario.id)
-    .maybeSingle();
-  if (error) throw error;
-  if (data) return data;
+      const { data: sesion, error: errSesion } = await anonDb().auth.signInWithPassword({ email, password });
+      if (errSesion || !sesion?.session) {
+        return res.status(500).json({ error: 'La cuenta se creó pero no se pudo iniciar sesión' });
+      }
 
-  const nombre = usuario.user_metadata?.nombre || usuario.email?.split('@')[0] || 'Ciclista';
-  const { data: nuevo, error: errNuevo } = await db
-    .from('perfiles')
-    .insert({ id: usuario.id, nombre })
-    .select('id, nombre, plan')
-    .single();
-  if (errNuevo) throw errNuevo;
-  return nuevo;
-}
+      return res.status(201).json({ token: sesion.session.access_token, perfil });
+    },
+  },
+  { publica: true },
+);
