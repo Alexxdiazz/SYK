@@ -1,4 +1,4 @@
-import { ruta, anonDb } from '../../lib/api.js';
+import { ruta, anonDb } from '../lib/api.js'; 
 
 export default ruta(
   {
